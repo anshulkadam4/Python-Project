@@ -1,17 +1,14 @@
 import sqlite3
 import os
-import pandas as pd  # <-- Added
-import numpy as np   # <-- Added
+import pandas as pd
+import numpy as np
 
 def clear_screen():
     """Clears the terminal screen."""
     os.system('cls' if os.name == 'nt' else 'clear')
 
 def setup_database():
-    """
-    Connects to the SQLite database and creates the 'customers' table 
-    if it doesn't already exist.
-    """
+    """Connects to the SQLite database and creates the 'customers' table."""
     conn = sqlite3.connect('utility.db')
     cursor = conn.cursor()
     
@@ -80,26 +77,18 @@ def admin_bulk_load():
     """Admin function: Loads new customers from a CSV file using pandas."""
     print("--- Bulk Load Customers from CSV ---")
     
-    # Note: We imported pandas at the top of the file
-    
     filename = input("Enter the CSV filename (e.g., sample_customers.csv): ")
     
     try:
-        # 1. Use pandas to read the CSV into a DataFrame
         df = pd.read_csv(filename)
         
-        # Check for required columns
         if not {'full_name', 'email', 'monthly_usage_kwh'}.issubset(df.columns):
             print("[Error] CSV must contain 'full_name', 'email', and 'monthly_usage_kwh' columns.")
             input("\nPress Enter to return...")
             return
 
-        # 2. Connect to the database
         conn = sqlite3.connect('utility.db')
-        
-        # 3. Use the DataFrame's .to_sql() method to append data
         df.to_sql('customers', conn, if_exists='append', index=False)
-        
         conn.close()
         
         print(f"\n[Success] Successfully added {len(df)} new customers from {filename}.")
@@ -118,12 +107,9 @@ def admin_bulk_load():
 def admin_view_analytics():
     """Admin function: Views consumption and billing analytics."""
     print("--- Portal Analytics Dashboard ---")
-    
-    # Note: We imported pandas and numpy at the top of the file
         
     conn = sqlite3.connect('utility.db')
     
-    # 1. Use pandas to read the entire SQL table into a DataFrame
     try:
         df = pd.read_sql_query("SELECT * FROM customers", conn)
     except pd.errors.DatabaseError:
@@ -139,41 +125,77 @@ def admin_view_analytics():
         input("\nPress Enter to return...")
         return
 
-    # 2. Use pandas for basic statistics
     total_customers = len(df)
     avg_usage = df['monthly_usage_kwh'].mean()
     max_usage = df['monthly_usage_kwh'].max()
     max_user = df[df['monthly_usage_kwh'] == max_usage]['full_name'].values[0]
 
-    # Calculate billing
-    COST_PER_KWH = 0.12
+    # Updated to Indian Rupees
+    COST_PER_KWH = 10  # ₹10 per kWh
     df['amount_due'] = df['monthly_usage_kwh'] * COST_PER_KWH
     
     total_revenue = df['amount_due'].sum()
     unpaid_bills_df = df[df['bill_paid'] == 0]
     total_unpaid = unpaid_bills_df['amount_due'].sum()
     
-    # 3. Use numpy for a specific calculation
-    # Get the 'amount_due' column as a NumPy array
     amount_due_array = df['amount_due'].values 
-    
-    # Use a fast, vectorized numpy operation
     hypothetical_revenue = np.sum(amount_due_array * 1.05)
     
-    # Display the report
     print("\n--- Customer & Usage Stats ---")
     print(f"  Total Customers:   {total_customers}")
     print(f"  Average Usage:     {avg_usage:.2f} kWh")
     print(f"  Highest Consumer:  {max_user} at {max_usage:.2f} kWh")
     
     print("\n--- Billing Stats ---")
-    print(f"  Total Billed:      ${total_revenue:.2f}")
-    print(f"  Total Unpaid:      ${total_unpaid:.2f} ({len(unpaid_bills_df)} customers)")
+    print(f"  Total Billed:      ₹{total_revenue:.2f}")
+    print(f"  Total Unpaid:      ₹{total_unpaid:.2f} ({len(unpaid_bills_df)} customers)")
     
     print("\n--- Projections (using NumPy) ---")
-    print(f"  Total revenue with 5% price hike: ${hypothetical_revenue:.2f}")
+    print(f"  Total revenue with 5% price hike: ₹{hypothetical_revenue:.2f}")
     
     input("\nPress Enter to return to the admin menu...")
+def admin_delete_customer():
+    """Admin function: Deletes a customer record by ID or email."""
+    print("--- Delete Customer ---")
+    choice = input("Delete by (1) ID or (2) Email? Enter 1 or 2: ")
+
+    conn = sqlite3.connect('utility.db')
+    cursor = conn.cursor()
+
+    try:
+        if choice == '1':
+            cust_id = input("Enter Customer ID to delete: ")
+            cursor.execute("SELECT * FROM customers WHERE id = ?", (cust_id,))
+            row = cursor.fetchone()
+            if not row:
+                print(f"[Error] No customer found with ID {cust_id}.")
+            else:
+                cursor.execute("DELETE FROM customers WHERE id = ?", (cust_id,))
+                conn.commit()
+                print(f"[Success] Customer ID {cust_id} deleted successfully.")
+        
+        elif choice == '2':
+            email = input("Enter Customer Email to delete: ")
+            cursor.execute("SELECT * FROM customers WHERE email = ?", (email,))
+            row = cursor.fetchone()
+            if not row:
+                print(f"[Error] No customer found with email {email}.")
+            else:
+                cursor.execute("DELETE FROM customers WHERE email = ?", (email,))
+                conn.commit()
+                print(f"[Success] Customer '{email}' deleted successfully.")
+        
+        else:
+            print("Invalid choice. Please enter 1 or 2.")
+    
+    except Exception as e:
+        print(f"[Error] An unexpected error occurred: {e}")
+    finally:
+        conn.close()
+
+    input("\nPress Enter to return to the admin menu...")
+
+
 
 def admin_menu():
     """Displays the admin-specific menu and handles choices."""
@@ -182,8 +204,8 @@ def admin_menu():
         print("--- Admin Management Portal ---")
         print("1. Add New Customer (Create)")
         print("2. View All Customers (Read)")
-        print("3. Bulk Load Customers from CSV (Pandas)") # <-- New
-        print("4. View Analytics Dashboard (Pandas/NumPy)") # <-- New
+        print("3. Bulk Load Customers from CSV (Pandas)")
+        print("4. View Analytics Dashboard (Pandas/NumPy)")
         print("5. Update Customer Usage (Update) - [TODO]")
         print("6. Delete Customer (Delete) - [TODO]")
         print("7. Return to Main Menu")
@@ -207,15 +229,13 @@ def admin_menu():
             print("This feature is not yet implemented.")
             input("Press Enter to continue...")
         elif choice == '6':
-            print("This feature is not yet implemented.")
-            input("Press Enter to continue...")
+            clear_screen()
+            admin_delete_customer()
         elif choice == '7':
-            break # Exit the while loop to return to main()
+            break
         else:
             print("Invalid choice. Please try again.")
             input("Press Enter to continue...")
-
-# --- Client Menu (from previous step, no changes) ---
 
 def client_view_bill():
     """Client function: Allows a client to view their bill using their email."""
@@ -237,13 +257,13 @@ def client_view_bill():
         print(f"  Email:       {row[2]}")
         print("\n--- Your Bill Status ---")
         
-        COST_PER_KWH = 0.12
+        COST_PER_KWH = 10  # ₹10 per kWh
         usage = row[3]
         amount_due = usage * COST_PER_KWH
         paid_status = "PAID" if row[4] else "NOT PAID"
         
         print(f"  Monthly Usage: {usage:.2f} kWh")
-        print(f"  Amount Due:    ${amount_due:.2f} (at ${COST_PER_KWH}/kWh)")
+        print(f"  Amount Due:    ₹{amount_due:.2f} (at ₹{COST_PER_KWH}/kWh)")
         print(f"  Status:        {paid_status}")
     else:
         print(f"\n[Error] No customer found with the email: {email}")
@@ -275,8 +295,6 @@ def client_menu():
             print("Invalid choice. Please try again.")
             input("Press Enter to continue...")
 
-# --- Main Function (no changes) ---
-
 def main():
     """Main function to run the portal application."""
     setup_database() 
@@ -306,3 +324,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+   
