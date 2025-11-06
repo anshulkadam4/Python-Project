@@ -1,9 +1,11 @@
 import sqlite3
 import os
+import re
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
 import bcrypt # For password hashing
+from datetime import datetime, timedelta
 from rich.console import Console
 from rich.table import Table
 from rich.prompt import Prompt, Confirm
@@ -11,13 +13,17 @@ from rich.panel import Panel
 
 # --- Initialize Rich Console ---
 console = Console()
+# Corrected Regex: enforces a dot separation (e.g., domain.com, rejects domain@com)
+EMAIL_REGEX = r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9-]+\.[a-zA-Z]{2,}$' 
 CONFIG = {
     'DATABASE_FILE': 'utility.db',
-    'COST_PER_KWH': 0.12,
+    'COST_PER_KWH': 0.50, # CHANGED: Rate updated to 0.50
     'EXPORT_FILENAME': 'customer_export.csv',
     'REPORT_FILENAME': 'usage_report.png',
     'SAMPLE_CSV': 'sample_customers.csv'
 }
+CURRENCY_SYMBOL = '₹' # Defined Currency Symbol
+
 def clear_screen():
     """Clears the terminal screen."""
     os.system('cls' if os.name == 'nt' else 'clear')
@@ -33,11 +39,11 @@ def check_password(password: str, hashed: bytes) -> bool:
     """Checks if a password matches its hash."""
     return bcrypt.checkpw(password.encode('utf-8'), hashed)
 
-# --- Database Setup (NOW WITH THE FIX) ---
+# --- Database Setup (Includes Date Columns and Receipts Table) ---
 
 def setup_database():
     """
-    Connects to the DB and creates BOTH tables if they don't exist.
+    Connects to the DB and creates all required tables if they don't exist.
     """
     conn = sqlite3.connect(CONFIG['DATABASE_FILE'])
     cursor = conn.cursor()
@@ -52,7 +58,7 @@ def setup_database():
     )
     ''')
     
-    # 2. MODIFIED 'customers' table with a new 'user_id' column
+    # 2. 'customers' table with all date columns
     cursor.execute('''
     CREATE TABLE IF NOT EXISTS customers (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -61,11 +67,24 @@ def setup_database():
         monthly_usage_kwh REAL DEFAULT 0.0,
         bill_paid BOOLEAN DEFAULT 0,
         user_id INTEGER,
+        last_payment_date TEXT,     -- Needed for tracking
+        bill_due_date TEXT,         -- Needed for aging reports
         FOREIGN KEY (user_id) REFERENCES users (id)
     )
     ''')
     
-    # --- !!! THIS IS THE FIX !!! ---
+    # 3. Create the 'receipts' table for transaction logging
+    cursor.execute('''
+    CREATE TABLE IF NOT EXISTS receipts (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        receipt_id TEXT UNIQUE NOT NULL,
+        customer_id INTEGER NOT NULL,
+        amount_paid REAL NOT NULL,
+        payment_date TEXT NOT NULL,
+        FOREIGN KEY (customer_id) REFERENCES customers (id)
+    )
+    ''')
+
     # Try to create a default admin user
     try:
         admin_hash = hash_password('admin') # Default password is 'admin'
@@ -77,7 +96,6 @@ def setup_database():
         console.print("[bold yellow on black]Default admin user 'admin@portal.com' (pass: 'admin') created.[/bold yellow on black]")
     except sqlite3.IntegrityError:
         pass # Admin already exists, do nothing
-    # --- END OF FIX ---
     
     conn.close()
 
@@ -88,6 +106,10 @@ def register_user():
     console.print(Panel("[bold green]Register New Client Account[/bold green]", padding=1))
     try:
         email = Prompt.ask("Enter your email")
+        if not re.match(EMAIL_REGEX, email):
+            console.print(f"\n[bold red][Error] '{email}' is not a valid email format.[/bold red]")
+            Prompt.ask("\nPress Enter to return...")
+            return
         full_name = Prompt.ask("Enter your full name")
         password = Prompt.ask("Enter a new password", password=True)
         password_confirm = Prompt.ask("Confirm your password", password=True)
@@ -99,7 +121,7 @@ def register_user():
 
         password_hash = hash_password(password)
         
-        conn = sqlite3.connect('utility.db')
+        conn = sqlite3.connect(CONFIG['DATABASE_FILE'])
         cursor = conn.cursor()
         
         # 1. Create the user
@@ -137,7 +159,7 @@ def login_user() -> tuple | None:
     email = Prompt.ask("Enter your email")
     password = Prompt.ask("Enter your password", password=True)
 
-    conn = sqlite3.connect('utility.db')
+    conn = sqlite3.connect(CONFIG['DATABASE_FILE'])
     cursor = conn.cursor()
     
     cursor.execute("SELECT id, email, password_hash, role FROM users WHERE email = ?", (email,))
@@ -156,19 +178,30 @@ def login_user() -> tuple | None:
     Prompt.ask("\nPress Enter to return...")
     return None # Failure
 
-# --- Admin Functions ---
+# --- Admin Functions (Currency Updated) ---
 
 def admin_create_admin_user():
-    """Admin function: Creates a new ADMIN user."""
+    """Admin function: Allows a logged-in admin to create a new admin user."""
     console.print(Panel("[bold yellow]Create New Admin User[/bold yellow]", padding=1))
     try:
         email = Prompt.ask("Enter new admin's email")
+        
+        # --- Validation Block ---
+        if not re.match(EMAIL_REGEX, email):
+            console.print(f"\n[bold red][Error] '{email}' is not a valid email format.[/bold red]")
+            Prompt.ask("\nPress Enter to return...")
+            return
+        # --- END OF VALIDATION ---
+        
         password = Prompt.ask("Enter a temporary password", password=True)
+        
+        # Hash the new admin's password
         password_hash = hash_password(password)
         
-        conn = sqlite3.connect('utility.db')
+        conn = sqlite3.connect(CONFIG['DATABASE_FILE'])
         cursor = conn.cursor()
         
+        # Insert the new admin into the 'users' table with the 'admin' role
         cursor.execute(
             "INSERT INTO users (email, password_hash, role) VALUES (?, ?, 'admin')",
             (email, password_hash)
@@ -183,17 +216,29 @@ def admin_create_admin_user():
     Prompt.ask("\nPress Enter to return...")
 
 def admin_add_customer():
-    """Admin function: Adds a new customer (NOT a user)."""
+    """
+    Admin function: Manually adds a new customer to the 'customers' table.
+    Note: This customer will NOT have a login.
+    """
     console.print(Panel("[bold cyan]Add New Customer (Manual Entry)[/bold cyan]", padding=1))
     console.print("[yellow]Note: This creates a customer profile without a login.\nUse 'Register' to create a client with a login.[/yellow]")
     try:
         name = Prompt.ask("Enter full name")
         email = Prompt.ask("Enter email")
+        
+        # --- Validation Block ---
+        if not re.match(EMAIL_REGEX, email):
+            console.print(f"\n[bold red][Error] '{email}' is not a valid email format.[/bold red]")
+            Prompt.ask("\nPress Enter to return...")
+            return
+        # --- END OF VALIDATION ---
+        
         usage = float(Prompt.ask("Enter initial monthly usage (kWh)"))
         
-        conn = sqlite3.connect('utility.db')
+        conn = sqlite3.connect(CONFIG['DATABASE_FILE'])
         cursor = conn.cursor()
         
+        # This customer will have user_id = NULL (or None)
         cursor.execute(
             "INSERT INTO customers (full_name, email, monthly_usage_kwh) VALUES (?, ?, ?)",
             (name, email, usage)
@@ -212,7 +257,7 @@ def admin_add_customer():
 def admin_view_all_customers():
     """Admin function: Displays all customer records."""
     console.print(Panel("[bold cyan]View All Customers[/bold cyan]", padding=1))
-    conn = sqlite3.connect('utility.db')
+    conn = sqlite3.connect(CONFIG['DATABASE_FILE'])
     cursor = conn.cursor()
     
     cursor.execute("SELECT * FROM customers ORDER BY full_name")
@@ -240,23 +285,26 @@ def admin_view_all_customers():
     Prompt.ask("\nPress Enter to return...")
 
 def admin_update_usage():
-    """Admin function: Updates a customer's usage."""
+    """
+    Admin function: Updates a customer's usage and resets bill_paid status.
+    """
     console.print(Panel("[bold cyan]Update Customer Usage[/bold cyan]", padding=1))
     try:
         customer_id = int(Prompt.ask("Enter the Customer ID to update"))
         new_usage = float(Prompt.ask(f"Enter the new usage for Customer {customer_id}"))
         
-        conn = sqlite3.connect('utility.db')
+        conn = sqlite3.connect(CONFIG['DATABASE_FILE'])
         cursor = conn.cursor()
         cursor.execute(
-            "UPDATE customers SET monthly_usage_kwh = ? WHERE id = ?",
+            # Resetting bill_paid to 0 for the new cycle
+            "UPDATE customers SET monthly_usage_kwh = ?, bill_paid = 0 WHERE id = ?",
             (new_usage, customer_id)
         )
         if cursor.rowcount == 0:
             console.print(f"\n[bold red][Error] No customer found with ID {customer_id}.[/bold red]")
         else:
             conn.commit()
-            console.print(f"\n[bold green][Success] Customer {customer_id}'s usage updated.[/bold green]")
+            console.print(f"\n[bold green][Success] Customer {customer_id}'s usage updated (Bill Reset).[/bold green]")
         conn.close()
     except ValueError:
         console.print("\n[bold red][Error] Invalid ID or usage. Please enter numbers.[/bold red]")
@@ -269,7 +317,7 @@ def admin_delete_customer():
         customer_id = int(Prompt.ask("Enter the Customer ID to [bold red]DELETE[/bold red]"))
         
         if Confirm.ask(f"Are you sure you want to permanently delete Customer {customer_id}?", default=False):
-            conn = sqlite3.connect('utility.db')
+            conn = sqlite3.connect(CONFIG['DATABASE_FILE'])
             cursor = conn.cursor()
             
             cursor.execute("SELECT user_id FROM customers WHERE id = ?", (customer_id,))
@@ -303,7 +351,7 @@ def admin_bulk_load():
     """Admin function: Loads new customers from a CSV file using pandas."""
     console.print(Panel("[bold cyan]Bulk Load Customers from CSV[/bold cyan]", padding=1))
     
-    filename = Prompt.ask("Enter the CSV filename", default="sample_customers.csv")
+    filename = Prompt.ask("Enter the CSV filename", default=CONFIG['SAMPLE_CSV'])
     
     try:
         df = pd.read_csv(filename)
@@ -312,7 +360,7 @@ def admin_bulk_load():
             Prompt.ask("\nPress Enter to return...")
             return
 
-        conn = sqlite3.connect('utility.db')
+        conn = sqlite3.connect(CONFIG['DATABASE_FILE'])
         # Note: These customers will not have user_id's and cannot log in
         df.to_sql('customers', conn, if_exists='append', index=False)
         conn.close()
@@ -333,14 +381,14 @@ def admin_export_to_csv():
     """Admin function: Exports all customer data to a CSV file."""
     console.print(Panel("[bold cyan]Export All Data to CSV[/bold cyan]", padding=1))
     
-    conn = sqlite3.connect('utility.db')
+    conn = sqlite3.connect(CONFIG['DATABASE_FILE'])
     df = pd.read_sql_query("SELECT * FROM customers", conn)
     conn.close()
     
     if df.empty:
         console.print("[bold yellow]No data to export.[/bold yellow]")
     else:
-        export_filename = "customer_export.csv"
+        export_filename = CONFIG['EXPORT_FILENAME']
         df.to_csv(export_filename, index=False)
         console.print(f"\n[bold green][Success] All {len(df)} records exported to {export_filename}[/bold green]")
         
@@ -350,7 +398,7 @@ def admin_generate_report():
     """Admin function: Generates a visual report of usage."""
     console.print(Panel("[bold cyan]Generate Visual Report[/bold cyan]", padding=1))
     
-    conn = sqlite3.connect('utility.db')
+    conn = sqlite3.connect(CONFIG['DATABASE_FILE'])
     df = pd.read_sql_query("SELECT full_name, monthly_usage_kwh FROM customers ORDER BY monthly_usage_kwh DESC LIMIT 10", conn)
     conn.close()
     
@@ -376,7 +424,7 @@ def admin_view_analytics():
     """Admin function: Views consumption and billing analytics."""
     console.print(Panel("[bold cyan]Portal Analytics Dashboard[/bold cyan]", padding=1))
     
-    conn = sqlite3.connect('utility.db')
+    conn = sqlite3.connect(CONFIG['DATABASE_FILE'])
     try:
         df = pd.read_sql_query("SELECT * FROM customers", conn)
     except pd.errors.DatabaseError:
@@ -399,7 +447,7 @@ def admin_view_analytics():
     if not df[df['monthly_usage_kwh'] == max_usage].empty:
         max_user = df[df['monthly_usage_kwh'] == max_usage]['full_name'].values[0]
 
-    COST_PER_KWH = 0.12
+    COST_PER_KWH = CONFIG['COST_PER_KWH']
     df['amount_due'] = df['monthly_usage_kwh'] * COST_PER_KWH
     total_revenue = df['amount_due'].sum()
     unpaid_bills_df = df[df['bill_paid'] == 0]
@@ -408,25 +456,72 @@ def admin_view_analytics():
     amount_due_array = df['amount_due'].values 
     hypothetical_revenue = np.sum(amount_due_array * 1.05)
     
-    # Display the report
+    # --- Aging Report (Simplified) ---
+    total_overdue_count = 0
+    total_overdue_amount = 0.0
+    
+    # Display the report (CURRENCY UPDATED)
     console.print("\n--- Customer & Usage Stats ---")
-    console.print(f"  Total Customers:   {total_customers}")
-    console.print(f"  Average Usage:     [yellow]{avg_usage:.2f} kWh[/yellow]")
-    console.print(f"  Highest Consumer:  [magenta]{max_user}[/magenta] at [yellow]{max_usage:.2f} kWh[/yellow]")
+    console.print(f"  Total Customers:   {total_customers}")
+    console.print(f"  Average Usage:     [yellow]{avg_usage:.2f} kWh[/yellow]")
+    console.print(f"  Highest Consumer:  [magenta]{max_user}[/magenta] at [yellow]{max_usage:.2f} kWh[/yellow]")
     console.print("\n--- Billing Stats ---")
-    console.print(f"  Total Billed:      [green]${total_revenue:.2f}[/green]")
-    console.print(f"  Total Unpaid:      [red]${total_unpaid:.2f}[/red] ({len(unpaid_bills_df)} customers)")
+    console.print(f"  Total Billed:      [green]{CURRENCY_SYMBOL}{total_revenue:.2f}[/green]")
+    console.print(f"  Total Unpaid:      [red]{CURRENCY_SYMBOL}{total_unpaid:.2f}[/red] ({len(unpaid_bills_df)} customers)")
     console.print("\n--- Projections (using NumPy) ---")
-    console.print(f"  Total revenue with 5% price hike: [green]${hypothetical_revenue:.2f}[/green]")
+    console.print(f"  Total revenue with 5% price hike: [green]{CURRENCY_SYMBOL}{hypothetical_revenue:.2f}[/green]")
     
     Prompt.ask("\nPress Enter to return...")
+
+def admin_view_receipts():
+    """Admin function: Displays a log of all successful receipts/payments."""
+    console.print(Panel("[bold yellow]View All Payment Receipts[/bold yellow]", padding=1))
+    
+    conn = sqlite3.connect(CONFIG['DATABASE_FILE'])
+    cursor = conn.cursor()
+    
+    # Joining receipts with customers to display the customer's name
+    query = """
+    SELECT 
+        r.receipt_id, 
+        c.full_name, 
+        r.amount_paid, 
+        r.payment_date, 
+        r.customer_id
+    FROM receipts r
+    JOIN customers c ON r.customer_id = c.id
+    ORDER BY r.id DESC
+    """
+    cursor.execute(query)
+    rows = cursor.fetchall()
+    conn.close()
+    
+    if not rows:
+        console.print("[yellow]No payment receipts found in the system.[/yellow]")
+    else:
+        table = Table(title="Payment Transaction Log", show_header=True, header_style="bold magenta")
+        table.add_column("Receipt ID", style="cyan")
+        table.add_column("Customer Name", style="white")
+        table.add_column(f"Amount Paid ({CURRENCY_SYMBOL})", style="green", justify="right")
+        table.add_column("Date", style="yellow")
+        table.add_column("CUST ID", style="dim")
+        
+        for row in rows:
+            table.add_row(
+                row[0], 
+                row[1], 
+                f"{row[2]:.2f}", 
+                row[3], 
+                str(row[4])
+            )
+        console.print(table)
+        
+    Prompt.ask("\nPress Enter to return...")
+
 
 def admin_menu():
     """Displays the admin-specific menu."""
     
-    # --- NEW: Menu Dispatch Table ---
-    # We map the string '1' to the function admin_add_customer
-    # Note: We don't CALL the function here (no parentheses)
     menu_options = {
         '1': admin_add_customer,
         '2': admin_view_all_customers,
@@ -437,6 +532,7 @@ def admin_menu():
         '7': admin_export_to_csv,
         '8': admin_generate_report,
         '9': admin_create_admin_user,
+        '11': admin_view_receipts, 
     }
 
     while True:
@@ -453,27 +549,26 @@ def admin_menu():
             "7. Export All Data to CSV\n"
             "8. Generate Visual Usage Report\n"
             "9. Create New ADMIN User\n"
+            "11. View All Payment Receipts [NEW]\n"
             "10. Logout"
         )
         console.print(menu_text)
         
-        choice = Prompt.ask("\nEnter your choice (1-10)", choices=[str(i) for i in range(1, 11)])
+        choice = Prompt.ask("\nEnter your choice (1-11)", choices=[str(i) for i in range(1, 10)] + ['10', '11'])
         
-        # --- REFACTORED LOGIC ---
         if choice in menu_options:
             clear_screen()
-            # Look up the function in the dictionary and THEN call it
             menu_options[choice]() 
         elif choice == '10':
             break # Exit loop to log out
-# --- Client Functions (MODIFIED) ---
+# --- Client Functions (Receipts Generated) ---
 
 def client_view_bill(logged_in_user_id: int):
     """Client function: Views the bill for the LOGGED IN user."""
     console.print(Panel("[bold green]View My Bill[/bold green]", padding=1))
     
-    conn = sqlite3.connect(CONFIG['DATABASE_FILE']) # Using CONFIG dict
-    conn.row_factory = sqlite3.Row  # <-- ADD THIS LINE
+    conn = sqlite3.connect(CONFIG['DATABASE_FILE']) 
+    conn.row_factory = sqlite3.Row  
     cursor = conn.cursor()
     cursor.execute("SELECT * FROM customers WHERE user_id = ?", (logged_in_user_id,))
     row = cursor.fetchone()
@@ -481,29 +576,33 @@ def client_view_bill(logged_in_user_id: int):
     
     if row:
         console.print("\n--- Your Customer Details ---")
-        console.print(f"  Customer ID: {row[0]}")
-        console.print(f"  Full Name:   [magenta]{row[1]}[/magenta]")
-        console.print(f"  Email:       [cyan]{row[2]}[/cyan]")
+        console.print(f"  Customer ID: {row['id']}") 
+        console.print(f"  Full Name:   [magenta]{row['full_name']}[/magenta]")
+        console.print(f"  Email:       [cyan]{row['email']}[/cyan]")
         console.print("\n--- Your Bill Status ---")
         
-        COST_PER_KWH = CONFIG['COST_PER_KWH'] # Using CONFIG dict
-        usage = row['monthly_usage_kwh'] # <-- Access by name!
+        COST_PER_KWH = CONFIG['COST_PER_KWH'] 
+        usage = row['monthly_usage_kwh'] 
         amount_due = usage * COST_PER_KWH
-        paid_status = "[bold green]✅ PAID[/bold green]" if row['bill_paid'] else "[bold red]❌ NOT PAID[/bold red]" # <-- Access by name!
+        paid_status = "[bold green]✅ PAID[/bold green]" if row['bill_paid'] else "[bold red]❌ NOT PAID[/bold red]"
 
-        console.print(f"  Monthly Usage: [yellow]{usage:.2f} kWh[/yellow]")
-        console.print(f"  Amount Due:    [bold yellow]${amount_due:.2f}[/bold yellow] (at ${COST_PER_KWH}/kWh)")
-        console.print(f"  Status:        {paid_status}")
+        # CURRENCY UPDATED
+        console.print(f"  Monthly Usage: [yellow]{usage:.2f} kWh[/yellow]")
+        console.print(f"  Amount Due:    [bold yellow]{CURRENCY_SYMBOL}{amount_due:.2f}[/bold yellow] (at {CURRENCY_SYMBOL}{COST_PER_KWH:.2f}/kWh)")
+        console.print(f"  Status:        {paid_status}")
     else:
         console.print(f"\n[bold red][Error] Could not find a customer profile linked to your user account.[/bold red]")
         
     Prompt.ask("\nPress Enter to return...")
 
 def client_pay_bill(logged_in_user_id: int):
-    """Client function: Allows the LOGGED IN user to pay their bill."""
+    """
+    Client function: Pays bill, resets usage, generates receipt, and logs transaction.
+    """
     console.print(Panel("[bold green]Pay My Bill[/bold green]", padding=1))
     
-    conn = sqlite3.connect('utility.db')
+    conn = sqlite3.connect(CONFIG['DATABASE_FILE'])
+    conn.row_factory = sqlite3.Row
     cursor = conn.cursor()
     cursor.execute("SELECT * FROM customers WHERE user_id = ?", (logged_in_user_id,))
     row = cursor.fetchone()
@@ -511,22 +610,76 @@ def client_pay_bill(logged_in_user_id: int):
     if not row:
         console.print(f"\n[bold red][Error] Could not find a customer profile linked to your user account.[/bold red]")
         conn.close()
-    elif row[4]: # if bill_paid is already 1 (True)
+        Prompt.ask("\nPress Enter to return...")
+        return
+    
+    customer_id = row['id']
+    
+    if row['bill_paid']: # if bill_paid is already 1 (True)
         console.print("\n[bold green]Your bill is already marked as PAID.[/bold green]")
         conn.close()
-    else:
-        COST_PER_KWH = 0.12
-        amount_due = row[3] * COST_PER_KWH
-        console.print(f"Your amount due is [bold yellow]${amount_due:.2f}[/bold yellow].")
+        Prompt.ask("\nPress Enter to return...")
+        return
+    
+    COST_PER_KWH = CONFIG['COST_PER_KWH']
+    usage_paid_for = row['monthly_usage_kwh']
+    amount_due = usage_paid_for * COST_PER_KWH
+    
+    # CURRENCY UPDATED
+    console.print(f"Your amount due is [bold yellow]{CURRENCY_SYMBOL}{amount_due:.2f}[/bold yellow].")
+    
+    if Confirm.ask("Do you want to confirm this payment?"):
         
-        if Confirm.ask("Do you want to confirm this payment?"):
-            cursor.execute("UPDATE customers SET bill_paid = 1 WHERE user_id = ?", (logged_in_user_id,))
+        today_date = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        # Unique Receipt ID format: RPT-YYYYMMDDHHMMSS-CUSTID
+        receipt_id = f"RPT-{datetime.now().strftime('%Y%m%d%H%M%S')}-{customer_id}"
+        
+        try:
+            # 1. Update Customer Record: Set paid=1, reset usage=0.0, and record payment date
+            cursor.execute(
+                "UPDATE customers SET bill_paid = 1, monthly_usage_kwh = 0.0, last_payment_date = ? WHERE user_id = ?", 
+                (today_date, logged_in_user_id)
+            )
+            
+            # 2. Log Receipt: Insert transaction details into the receipts table
+            cursor.execute(
+                "INSERT INTO receipts (receipt_id, customer_id, amount_paid, payment_date) VALUES (?, ?, ?, ?)",
+                (receipt_id, customer_id, amount_due, today_date)
+            )
+            
             conn.commit()
-            console.print("\n[bold green][Success] Thank you! Your bill is now marked as PAID.[/bold green]")
-        else:
-            console.print("\nPayment cancelled.")
-        conn.close()
+            
+            # 3. Generate Visual Receipt
+            console.print("\n" + "="*50)
+            console.print(Panel(
+                f"[bold green]✅ PAYMENT SUCCESSFUL[/bold green]", 
+                title=f"Receipt: {receipt_id}", 
+                padding=1
+            ))
+            
+            receipt_table = Table(show_header=False, border_style="dim", width=50)
+            receipt_table.add_column("Key", style="dim")
+            receipt_table.add_column("Value", style="white", justify="right")
+            
+            receipt_table.add_row("Customer ID", str(customer_id))
+            receipt_table.add_row("Paid By", row['full_name'])
+            receipt_table.add_row("Payment Date", today_date)
+            receipt_table.add_row("Usage Billed (kWh)", f"{usage_paid_for:.2f}")
+            receipt_table.add_row("[bold yellow]Amount Paid[/bold yellow]", f"[bold yellow]{CURRENCY_SYMBOL}{amount_due:.2f}[/bold yellow]")
+            
+            console.print(receipt_table)
+            console.print("="*50)
+            
+        except sqlite3.OperationalError as e:
+            # This block is essential for catching the "no such column" error
+            console.print(f"\n[bold red][CRITICAL ERROR] Database operation failed: {e}[/bold red]")
+            console.print("[yellow]Please delete 'utility.db' and re-run the program to fix the database structure.[/yellow]")
+            conn.rollback()
         
+    else:
+        console.print("\nPayment cancelled.")
+    
+    conn.close()
     Prompt.ask("\nPress Enter to return...")
 
 def client_menu(logged_in_user_id: int):
@@ -553,7 +706,7 @@ def client_menu(logged_in_user_id: int):
         elif choice == '3':
             break
 
-# --- Post-Login Router ---
+# --- Post-Login Router (Unchanged) ---
 
 def run_portal(user_data: tuple):
     """
@@ -570,7 +723,7 @@ def run_portal(user_data: tuple):
         console.print(f"[bold red]Error: Unknown user role '{user_role}'.[/bold red]")
         Prompt.ask("Press Enter to log out...")
 
-# --- Main Application ---
+# --- Main Application (Unchanged) ---
 
 def main():
     """Main function to run the portal application."""
@@ -580,7 +733,7 @@ def main():
         clear_screen()
         console.print(Panel(
             "[bold green]========================================\n"
-            "  Welcome to the Utility Management Portal  \n"
+            "  Welcome to the Utility Management Portal  \n"
             "========================================[/bold green]",
             title="Main Menu",
             padding=1
@@ -609,4 +762,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
