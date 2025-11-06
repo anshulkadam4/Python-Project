@@ -126,8 +126,8 @@ def register_user():
             return
 
         # --- NEW: Password length validation ---
-        if len(password) < 6:
-            console.print("\n[bold red][Error] Password must be at least 6 characters long.[/bold red]")
+        if len(password) < 4:
+            console.print("\n[bold red][Error] Password must be at least 4 characters long.[/bold red]")
             Prompt.ask("\nPress Enter to return...")
             return
         # --- END NEW ---
@@ -217,8 +217,8 @@ def admin_create_admin_user():
         password = Prompt.ask("Enter a temporary password", password=True)
         
         # --- NEW: Password length validation ---
-        if len(password) < 6:
-            console.print("\n[bold red][Error] Password must be at least 6 characters long.[/bold red]")
+        if len(password) < 4:
+            console.print("\n[bold red][Error] Password must be at least 4 characters long.[/bold red]")
             Prompt.ask("\nPress Enter to return...")
             return
         # --- END NEW ---
@@ -794,4 +794,5 @@ def main():
             break
 
 if __name__ == "__main__":
+
     main()
