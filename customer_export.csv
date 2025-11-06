@@ -1,0 +1,5 @@
+id,full_name,email,monthly_usage_kwh,bill_paid,user_id,last_payment_date,bill_due_date
+8,Karan Singh,karan.s@home.in,1002.52,0,2,,
+9,Aarav Rajesh,aarav@gmail.com,345.6,0,3,,
+10,Manan Shah,manan@gmail.com,0.0,1,4,2025-11-06 13:23:15,
+11,Medha Srishti,medha@yahoo.com,0.0,1,5,2025-11-06 13:23:58,
