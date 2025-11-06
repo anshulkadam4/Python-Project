@@ -11,7 +11,13 @@ from rich.panel import Panel
 
 # --- Initialize Rich Console ---
 console = Console()
-
+CONFIG = {
+    'DATABASE_FILE': 'utility.db',
+    'COST_PER_KWH': 0.12,
+    'EXPORT_FILENAME': 'customer_export.csv',
+    'REPORT_FILENAME': 'usage_report.png',
+    'SAMPLE_CSV': 'sample_customers.csv'
+}
 def clear_screen():
     """Clears the terminal screen."""
     os.system('cls' if os.name == 'nt' else 'clear')
@@ -33,7 +39,7 @@ def setup_database():
     """
     Connects to the DB and creates BOTH tables if they don't exist.
     """
-    conn = sqlite3.connect('utility.db')
+    conn = sqlite3.connect(CONFIG['DATABASE_FILE'])
     cursor = conn.cursor()
     
     # 1. Create the 'users' table
@@ -351,7 +357,7 @@ def admin_generate_report():
     if df.empty:
         console.print("[bold yellow]No data to generate report.[/bold yellow]")
     else:
-        report_filename = "usage_report.png"
+        report_filename = CONFIG['REPORT_FILENAME']
         
         plt.figure(figsize=(10, 7))
         plt.bar(df['full_name'], df['monthly_usage_kwh'])
@@ -417,6 +423,22 @@ def admin_view_analytics():
 
 def admin_menu():
     """Displays the admin-specific menu."""
+    
+    # --- NEW: Menu Dispatch Table ---
+    # We map the string '1' to the function admin_add_customer
+    # Note: We don't CALL the function here (no parentheses)
+    menu_options = {
+        '1': admin_add_customer,
+        '2': admin_view_all_customers,
+        '3': admin_update_usage,
+        '4': admin_delete_customer,
+        '5': admin_bulk_load,
+        '6': admin_view_analytics,
+        '7': admin_export_to_csv,
+        '8': admin_generate_report,
+        '9': admin_create_admin_user,
+    }
+
     while True:
         clear_screen()
         console.print(Panel("[bold cyan]Admin Management Portal[/bold cyan]", title="Admin Menu", padding=1))
@@ -437,34 +459,21 @@ def admin_menu():
         
         choice = Prompt.ask("\nEnter your choice (1-10)", choices=[str(i) for i in range(1, 11)])
         
-        if choice == '1':
-            clear_screen(); admin_add_customer()
-        elif choice == '2':
-            clear_screen(); admin_view_all_customers()
-        elif choice == '3':
-            clear_screen(); admin_update_usage()
-        elif choice == '4':
-            clear_screen(); admin_delete_customer()
-        elif choice == '5':
-            clear_screen(); admin_bulk_load()
-        elif choice == '6':
-            clear_screen(); admin_view_analytics()
-        elif choice == '7':
-            clear_screen(); admin_export_to_csv()
-        elif choice == '8':
-            clear_screen(); admin_generate_report()
-        elif choice == '9':
-            clear_screen(); admin_create_admin_user()
+        # --- REFACTORED LOGIC ---
+        if choice in menu_options:
+            clear_screen()
+            # Look up the function in the dictionary and THEN call it
+            menu_options[choice]() 
         elif choice == '10':
             break # Exit loop to log out
-
 # --- Client Functions (MODIFIED) ---
 
 def client_view_bill(logged_in_user_id: int):
     """Client function: Views the bill for the LOGGED IN user."""
     console.print(Panel("[bold green]View My Bill[/bold green]", padding=1))
     
-    conn = sqlite3.connect('utility.db')
+    conn = sqlite3.connect(CONFIG['DATABASE_FILE']) # Using CONFIG dict
+    conn.row_factory = sqlite3.Row  # <-- ADD THIS LINE
     cursor = conn.cursor()
     cursor.execute("SELECT * FROM customers WHERE user_id = ?", (logged_in_user_id,))
     row = cursor.fetchone()
@@ -477,11 +486,11 @@ def client_view_bill(logged_in_user_id: int):
         console.print(f"  Email:       [cyan]{row[2]}[/cyan]")
         console.print("\n--- Your Bill Status ---")
         
-        COST_PER_KWH = 0.12
-        usage = row[3]
+        COST_PER_KWH = CONFIG['COST_PER_KWH'] # Using CONFIG dict
+        usage = row['monthly_usage_kwh'] # <-- Access by name!
         amount_due = usage * COST_PER_KWH
-        paid_status = "[bold green]✅ PAID[/bold green]" if row[4] else "[bold red]❌ NOT PAID[/bold red]"
-        
+        paid_status = "[bold green]✅ PAID[/bold green]" if row['bill_paid'] else "[bold red]❌ NOT PAID[/bold red]" # <-- Access by name!
+
         console.print(f"  Monthly Usage: [yellow]{usage:.2f} kWh[/yellow]")
         console.print(f"  Amount Due:    [bold yellow]${amount_due:.2f}[/bold yellow] (at ${COST_PER_KWH}/kWh)")
         console.print(f"  Status:        {paid_status}")
