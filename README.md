@@ -1,1 +1,1 @@
-# Electricity Billing System (Admin/User portal)
+# Energy Management System (Admin/User portal)
