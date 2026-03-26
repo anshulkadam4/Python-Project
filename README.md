@@ -1,1 +1,1 @@
-# Python-Project
+# Electricity Billing System (Admin/User portal)
